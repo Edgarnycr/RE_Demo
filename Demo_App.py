@@ -120,6 +120,7 @@ st.markdown(
     /* ── Sidebar "tab" selector (rectangular pills) ── */
     section[data-testid="stSidebar"] div[role="radiogroup"] {
         gap: 0.45rem;
+        margin: 4px 0 4px 0;
     }
     section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"] {
         background: #152940;
@@ -153,33 +154,39 @@ st.markdown(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR  —  Navigation + API Keys & info
+# SIDEBAR  —  Client auth + Navigation + Developer tools
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
+    # Client-level access control
+    st.markdown("### Client Access")
+    client_id = st.text_input("Client ID / Access Code", type="password")
+    if client_id:
+        st.session_state["user_folder"] = client_id.strip()
+    st.markdown("---")
+
     st.markdown("## Navigation")
     page = st.radio(
         "Page",
-        ["Underwriting", "Portfolio Management", "Market Intelligence"],
+        ["Underwriting", "Portfolio Management", "Market Intelligence", "Developer Tools"],
         label_visibility="collapsed",
         key="page",
     )
     st.markdown("---")
 
-    st.markdown("## 🔑 API Configuration")
-    st.markdown("---")
-    anthropic_key = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        placeholder="sk-ant-...",
-        help="Used for PDF extraction via Claude 3.5 Sonnet",
-    )
-    perplexity_key = st.text_input(
-        "Perplexity API Key",
-        type="password",
-        placeholder="pplx-...",
-        help="Used for live market intelligence via Sonar",
-    )
-    st.markdown("---")
+    # Ensure keys exist in session even when not editing them
+    if "anthropic_key" not in st.session_state:
+        st.session_state["anthropic_key"] = ""
+    if "perplexity_key" not in st.session_state:
+        st.session_state["perplexity_key"] = ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HERO HEADER
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown('<p class="hero-title">🏦 CRE Underwriting Automation</p>', unsafe_allow_html=True)
+st.markdown('<p class="hero-sub">Demo Sandbox · Institutional Underwriting & Market Intelligence</p>', unsafe_allow_html=True)
+st.markdown("---")
+
+if page == "Underwriting":
     st.markdown(
         """
         <div style='font-size:12px;color:#556b7d;line-height:1.7'>
@@ -194,17 +201,6 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.markdown("---")
-    st.markdown(
-        "<div style='font-size:11px;color:#3d5570'>Zero-retention: no files are written to disk.</div>",
-        unsafe_allow_html=True,
-    )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HERO HEADER
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<p class="hero-title">🏦 CRE Underwriting Automation</p>', unsafe_allow_html=True)
-st.markdown('<p class="hero-sub">Demo Sandbox · Institutional Underwriting & Market Intelligence</p>', unsafe_allow_html=True)
-st.markdown("---")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTRACTION PROMPT
@@ -854,9 +850,12 @@ def build_excel(extracted: dict, market: dict) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
-for key in ["extracted", "market", "excel_bytes", "pdf_text", "file_log", "stored_files"]:
+for key in ["extracted", "market", "excel_bytes", "pdf_text", "file_log", "stored_files", "user_folder"]:
     if key not in st.session_state:
-        st.session_state[key] = [] if key in {"file_log", "stored_files"} else None
+        if key in {"file_log", "stored_files"}:
+            st.session_state[key] = []
+        else:
+            st.session_state[key] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN UI
@@ -874,6 +873,7 @@ def _store_uploaded_pdf(uploaded_file_obj) -> Optional[Dict[str, Any]]:
         "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "filename": uploaded_file_obj.name,
         "pdf_bytes": pdf_bytes,
+        "owner": st.session_state.get("user_folder"),
     }
     st.session_state["stored_files"].append(entry)
     st.session_state["stored_files"] = st.session_state["stored_files"][-20:]
@@ -881,6 +881,9 @@ def _store_uploaded_pdf(uploaded_file_obj) -> Optional[Dict[str, Any]]:
 
 
 if page == "Underwriting":
+    anthropic_key = st.session_state.get("anthropic_key", "")
+    perplexity_key = st.session_state.get("perplexity_key", "")
+
     st.markdown("### 📄 Upload Broker Offering Memorandum")
     uploaded_file = st.file_uploader(
         "Drag & drop or click to upload a PDF",
@@ -981,6 +984,7 @@ if page == "Underwriting":
                 st.session_state["excel_bytes"] = None  # reset on new run
                 status.update(label="✅ Analysis complete!", state="complete")
                 completion_pct, confidence_score, suggestion = compute_extraction_scores(extracted)
+                owner = st.session_state.get("user_folder")
                 st.session_state["file_log"].append(
                     {
                         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -988,6 +992,7 @@ if page == "Underwriting":
                         "Property Name (Extracted)": extracted.get("property_name") or "N/A",
                         "Confidence Score": f"{confidence_score}% (completion {completion_pct}%)",
                         "Suggested Prompt Addition/correction": suggestion,
+                        "Owner": owner,
                     }
                 )
                 st.session_state["file_log"] = st.session_state["file_log"][-50:]
@@ -1001,37 +1006,64 @@ if page == "Underwriting":
         "Uploaded PDFs are stored in-memory for this session and can be downloaded any time."
     )
 
-    if st.session_state["stored_files"]:
-        for f in reversed(st.session_state["stored_files"]):
-            c1, c2, c3 = st.columns([3, 2, 1])
-            c1.markdown(f"**{f.get('filename','(untitled)')}**")
-            c2.markdown(f"<span style='color:#7a9cbf'>{f.get('timestamp','')}</span>", unsafe_allow_html=True)
-            c3.download_button(
-                "Download",
-                data=f.get("pdf_bytes", b""),
-                file_name=f.get("filename", "uploaded.pdf"),
-                mime="application/pdf",
-                use_container_width=True,
-                key=f"dl_{f.get('id')}",
-            )
-    else:
-        st.info("No PDFs uploaded yet.")
+    user_folder = st.session_state.get("user_folder")
+    is_admin = user_folder == "EDGAR_ADMIN"
 
-    st.markdown("#### Extraction Activity")
-    if st.session_state["file_log"]:
-        df = pd.DataFrame(st.session_state["file_log"])
-        df = df[
-            [
-                "Timestamp",
-                "Filename",
-                "Property Name (Extracted)",
-                "Confidence Score",
-                "Suggested Prompt Addition/correction",
-            ]
-        ]
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    if not user_folder:
+        st.info("Enter a Client ID in the sidebar to view your files.")
     else:
-        st.info("No extractions logged yet.")
+        # Filter stored files by owner unless admin
+        if st.session_state["stored_files"]:
+            if is_admin:
+                visible_files = list(st.session_state["stored_files"])
+            else:
+                visible_files = [
+                    f for f in st.session_state["stored_files"] if f.get("owner") == user_folder
+                ]
+
+            if visible_files:
+                for f in reversed(visible_files):
+                    c1, c2, c3 = st.columns([3, 2, 1])
+                    c1.markdown(f"**{f.get('filename','(untitled)')}**")
+                    c2.markdown(
+                        f"<span style='color:#7a9cbf'>{f.get('timestamp','')}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    c3.download_button(
+                        "Download",
+                        data=f.get("pdf_bytes", b""),
+                        file_name=f.get("filename", "uploaded.pdf"),
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key=f"dl_{f.get('id')}",
+                    )
+            else:
+                st.info("No PDFs uploaded yet for this Client ID.")
+
+        else:
+            st.info("No PDFs uploaded yet.")
+
+        st.markdown("#### Extraction Activity")
+        if st.session_state["file_log"]:
+            log_df = pd.DataFrame(st.session_state["file_log"])
+            if not is_admin:
+                log_df = log_df[log_df["Owner"] == user_folder] if "Owner" in log_df.columns else log_df.iloc[0:0]
+
+            if not log_df.empty:
+                log_df = log_df[
+                    [
+                        "Timestamp",
+                        "Filename",
+                        "Property Name (Extracted)",
+                        "Confidence Score",
+                        "Suggested Prompt Addition/correction",
+                    ]
+                ]
+                st.dataframe(log_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No extractions logged yet for this Client ID.")
+        else:
+            st.info("No extractions logged yet.")
 
 elif page == "Portfolio Management":
     st.markdown("### 📈 Portfolio Management (Placeholder Dashboard)")
@@ -1046,6 +1078,9 @@ elif page == "Portfolio Management":
             {"Client": "Client C", "Property Type": "Industrial", "Region": "West", "AUM": 275_000_000, "Commitments": 70_000_000, "LTV": 0.56, "DSCR": 1.70, "DY": 0.082},
         ]
     )
+
+    base_total_aum = float(pm_data["AUM"].sum())
+    scaling_factor = 3_200_000_000.0 / base_total_aum if base_total_aum else 1.0
 
     f1, f2, f3, f4 = st.columns(4)
     with f1:
@@ -1104,12 +1139,20 @@ elif page == "Portfolio Management":
     st.markdown("<br>", unsafe_allow_html=True)
     c_chart1, c_chart2, c_summary = st.columns([1, 1, 1.1], vertical_alignment="top")
     with c_chart1:
-        st.altair_chart(_donut_chart(prop_counts, "Property type", "Property Type"), use_container_width=True)
+        st.markdown(
+            "<div style='text-align:center'><h4 style='margin-bottom:4px'>Property type</h4></div>",
+            unsafe_allow_html=True,
+        )
+        st.altair_chart(_donut_chart(prop_counts, "", "Property Type"), use_container_width=True)
     with c_chart2:
-        st.altair_chart(_donut_chart(region_counts, "Region", "Region"), use_container_width=True)
+        st.markdown(
+            "<div style='text-align:center'><h4 style='margin-bottom:4px'>Region</h4></div>",
+            unsafe_allow_html=True,
+        )
+        st.altair_chart(_donut_chart(region_counts, "", "Region"), use_container_width=True)
     with c_summary:
         raw_total_aum = float(df["AUM"].sum()) if not df.empty else 0.0
-        total_aum = min(3_200_000_000.0, raw_total_aum)  # cap at 3.2B
+        total_aum = raw_total_aum * scaling_factor if raw_total_aum else 0.0
         avg_ltv = float((df["LTV"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
         w_dscr = float((df["DSCR"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
         w_dy = float((df["DY"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
@@ -1117,7 +1160,7 @@ elif page == "Portfolio Management":
         summary = pd.DataFrame(
             {
                 "Metric": [
-                    "Total AUM (max 3.2B)",
+                    "Total AUM",
                     "Total Loans",
                     "Average LTV",
                     "Weighted DSCR",
@@ -1260,6 +1303,35 @@ elif page == "Market Intelligence":
                 "Loan name": st.column_config.TextColumn(width=280),
             },
         )
+elif page == "Developer Tools":
+    st.markdown("### 🔧 Developer Tools")
+    st.markdown("Configure API keys and admin behaviour for this demo.")
+    st.markdown("---")
+
+    anthropic_key = st.text_input(
+        "Anthropic API Key",
+        type="password",
+        placeholder="sk-ant-...",
+        value=st.session_state.get("anthropic_key", ""),
+        help="Used for PDF extraction via Claude 3.5 Sonnet",
+    )
+    perplexity_key = st.text_input(
+        "Perplexity API Key",
+        type="password",
+        placeholder="pplx-...",
+        value=st.session_state.get("perplexity_key", ""),
+        help="Used for live market intelligence via Sonar",
+    )
+    st.session_state["anthropic_key"] = anthropic_key
+    st.session_state["perplexity_key"] = perplexity_key
+
+    st.markdown("---")
+    st.markdown(
+        "<div style='font-size:12px;color:#556b7d;line-height:1.6'>"
+        "Use the <b>Client ID</b> field in the sidebar to impersonate a client."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESULTS
