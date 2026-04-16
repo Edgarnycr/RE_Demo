@@ -8,6 +8,7 @@ import json
 import re
 import traceback
 from datetime import datetime
+from typing import Optional, Dict, Any
 
 import anthropic
 import pandas as pd
@@ -115,17 +116,53 @@ st.markdown(
 
     /* ── Divider ── */
     hr { border-color: #1e3a5f !important; }
+
+    /* ── Sidebar "tab" selector (rectangular pills) ── */
+    section[data-testid="stSidebar"] div[role="radiogroup"] {
+        gap: 0.45rem;
+    }
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"] {
+        background: #152940;
+        border: 1px solid #1e3a5f;
+        border-radius: 10px;
+        padding: 10px 10px;
+        margin: 0px 0px 8px 0px;
+        transition: all .15s ease-in-out;
+    }
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"]:hover {
+        border-color: #f0c040;
+        background: #12253b;
+    }
+    /* hide the little radio circle */
+    section[data-testid="stSidebar"] label[data-baseweb="radio"] > div:first-child {
+        display: none !important;
+    }
+    /* selected state */
+    section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(div[role="radio"][aria-checked="true"]) {
+        border-color: #f0c040;
+        background: linear-gradient(135deg, rgba(201,162,39,0.22), rgba(240,192,64,0.12));
+        box-shadow: 0 0 0 1px rgba(240,192,64,0.25) inset;
+    }
+    /* fallback selected state (when :has isn't supported) */
+    section[data-testid="stSidebar"] div[role="radio"][aria-checked="true"] {
+        background: transparent !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR  —  API Keys & info
+# SIDEBAR  —  Navigation + API Keys & info
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## File Log")
-    page = st.radio("Page", ["Underwriting", "File Log"], label_visibility="collapsed")
+    st.markdown("## Navigation")
+    page = st.radio(
+        "Page",
+        ["Underwriting", "Portfolio Management", "Market Intelligence"],
+        label_visibility="collapsed",
+        key="page",
+    )
     st.markdown("---")
 
     st.markdown("## 🔑 API Configuration")
@@ -824,12 +861,163 @@ for key in ["extracted", "market", "excel_bytes", "pdf_text", "file_log", "store
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN UI
 # ─────────────────────────────────────────────────────────────────────────────
-if page == "File Log":
+def _store_uploaded_pdf(uploaded_file_obj) -> Optional[Dict[str, Any]]:
+    if uploaded_file_obj is None:
+        return None
+    pdf_bytes = uploaded_file_obj.getvalue()
+    file_id = f"{uploaded_file_obj.name}:{len(pdf_bytes)}"
+    existing_ids = {f.get("id") for f in (st.session_state.get("stored_files") or [])}
+    if file_id in existing_ids:
+        return next((f for f in st.session_state["stored_files"] if f.get("id") == file_id), None)
+    entry = {
+        "id": file_id,
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "filename": uploaded_file_obj.name,
+        "pdf_bytes": pdf_bytes,
+    }
+    st.session_state["stored_files"].append(entry)
+    st.session_state["stored_files"] = st.session_state["stored_files"][-20:]
+    return entry
+
+
+if page == "Underwriting":
+    st.markdown("### 📄 Upload Broker Offering Memorandum")
+    uploaded_file = st.file_uploader(
+        "Drag & drop or click to upload a PDF",
+        type=["pdf"],
+        label_visibility="collapsed",
+        key="broker_om_uploader",
+    )
+    stored_entry = _store_uploaded_pdf(uploaded_file)
+
+    if uploaded_file and anthropic_key:
+        col_run, col_info = st.columns([1, 3])
+        with col_run:
+            run_btn = st.button("⚙️ Extract & Analyze", use_container_width=True)
+        with col_info:
+            if not perplexity_key:
+                st.info(
+                    "Perplexity key not set — a brief market & submarket summary will be generated with Claude "
+                    "(general knowledge, not live web data).",
+                    icon="ℹ️",
+                )
+
+        if run_btn:
+            with st.status("🔍 Processing your OM…", expanded=True) as status:
+
+                # 1. PDF text
+                st.write("📃 Extracting PDF text…")
+                pdf_bytes = stored_entry["pdf_bytes"] if stored_entry else uploaded_file.getvalue()
+                pdf_text = extract_pdf_text(pdf_bytes)
+                st.session_state["pdf_text"] = pdf_text
+
+                # 2. Anthropic extraction
+                st.write("🤖 Sending to Claude 3.5 Sonnet for structured extraction…")
+                try:
+                    extracted = extract_with_anthropic(pdf_text, anthropic_key)
+                    st.session_state["extracted"] = extracted
+                    st.write(
+                        f"✅ Extracted {len([k for k, v in extracted.items() if v is not None])} fields."
+                    )
+                except Exception as e:
+                    st.error(f"Anthropic extraction failed: {e}")
+                    st.stop()
+
+                # 3. Market intelligence (Perplexity, or Claude fallback)
+                city = extracted.get("city", "") or ""
+                state = extracted.get("state", "") or ""
+                ptype = extracted.get("property_type", "Commercial") or "Commercial"
+
+                if city and state:
+                    if perplexity_key:
+                        st.write(
+                            f"🌐 Fetching market intelligence for {ptype} in {city}, {state}…"
+                        )
+                        try:
+                            market = get_perplexity_research(city, state, ptype, perplexity_key)
+                            st.session_state["market"] = market
+                            st.write(
+                                f"✅ Market data received. {len(market.get('comps', []))} comps parsed."
+                            )
+                        except Exception as e:
+                            st.warning(
+                                f"Perplexity unavailable ({e}). Using Claude for market & submarket summary."
+                            )
+                            try:
+                                market = get_claude_market_summary(
+                                    city, state, ptype, extracted, anthropic_key
+                                )
+                                st.session_state["market"] = market
+                                st.write("✅ Claude market summary ready (general knowledge, not live data).")
+                            except Exception as ce:
+                                st.error(f"Claude market summary failed: {ce}")
+                                st.session_state["market"] = {
+                                    "raw_text": f"Perplexity error: {e}\nClaude fallback error: {ce}",
+                                    "metrics": {},
+                                    "comps": [],
+                                    "citations": [],
+                                    "city": city,
+                                    "state": state,
+                                    "property_type": ptype,
+                                    "market_source": "error",
+                                }
+                    else:
+                        st.write(
+                            f"🤖 Generating market & submarket summary with Claude for {ptype} in {city}, {state}…"
+                        )
+                        try:
+                            market = get_claude_market_summary(
+                                city, state, ptype, extracted, anthropic_key
+                            )
+                            st.session_state["market"] = market
+                            st.write("✅ Claude market summary ready (general knowledge, not live data).")
+                        except Exception as e:
+                            st.error(f"Claude market summary failed: {e}")
+                            st.session_state["market"] = None
+                else:
+                    st.warning("City/State not found in OM — skipping market research.")
+                    st.session_state["market"] = None
+
+                st.session_state["excel_bytes"] = None  # reset on new run
+                status.update(label="✅ Analysis complete!", state="complete")
+                completion_pct, confidence_score, suggestion = compute_extraction_scores(extracted)
+                st.session_state["file_log"].append(
+                    {
+                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Filename": uploaded_file.name,
+                        "Property Name (Extracted)": extracted.get("property_name") or "N/A",
+                        "Confidence Score": f"{confidence_score}% (completion {completion_pct}%)",
+                        "Suggested Prompt Addition/correction": suggestion,
+                    }
+                )
+                st.session_state["file_log"] = st.session_state["file_log"][-50:]
+
+    elif uploaded_file and not anthropic_key:
+        st.warning("Please enter your Anthropic API key in the sidebar to begin.", icon="🔑")
+
+    st.markdown("---")
     st.markdown("### 🗂️ File Log")
     st.markdown(
-        "Temporarily stores uploaded broker packages (in-memory) and logs extraction completion + confidence."
+        "Uploaded PDFs are stored in-memory for this session and can be downloaded any time."
     )
 
+    if st.session_state["stored_files"]:
+        for f in reversed(st.session_state["stored_files"]):
+            c1, c2, c3 = st.columns([3, 2, 1])
+            c1.markdown(f"**{f.get('filename','(untitled)')}**")
+            c2.markdown(f"<span style='color:#7a9cbf'>{f.get('timestamp','')}</span>", unsafe_allow_html=True)
+            c3.download_button(
+                "Download",
+                data=f.get("pdf_bytes", b""),
+                file_name=f.get("filename", "uploaded.pdf"),
+                mime="application/pdf",
+                use_container_width=True,
+                key=f"dl_{f.get('id')}",
+            )
+    else:
+        st.info("No PDFs uploaded yet.")
+
+    st.markdown("#### Extraction Activity")
     if st.session_state["file_log"]:
         df = pd.DataFrame(st.session_state["file_log"])
         df = df[
@@ -843,120 +1031,164 @@ if page == "File Log":
         ]
         st.dataframe(df, use_container_width=True, hide_index=True)
     else:
-        st.info("No files logged yet. Run an extraction from the Underwriting page.")
+        st.info("No extractions logged yet.")
 
-    st.stop()
+elif page == "Portfolio Management":
+    st.markdown("### 📈 Portfolio Management (Placeholder Dashboard)")
 
-st.markdown("### 📄 Upload Broker Offering Memorandum")
-uploaded_file = st.file_uploader(
-    "Drag & drop or click to upload a PDF",
-    type=["pdf"],
-    label_visibility="collapsed",
-)
+    pm_data = pd.DataFrame(
+        [
+            {"Client": "Client A", "Property Type": "Multi Family", "Region": "Northeast", "AUM": 450_000_000, "Commitments": 120_000_000, "LTV": 0.63, "DSCR": 1.48, "DY": 0.092},
+            {"Client": "Client A", "Property Type": "Industrial", "Region": "South", "AUM": 310_000_000, "Commitments": 80_000_000, "LTV": 0.58, "DSCR": 1.62, "DY": 0.087},
+            {"Client": "Client B", "Property Type": "Office", "Region": "West", "AUM": 220_000_000, "Commitments": 60_000_000, "LTV": 0.67, "DSCR": 1.28, "DY": 0.101},
+            {"Client": "Client B", "Property Type": "Hospitality", "Region": "Midwest", "AUM": 140_000_000, "Commitments": 35_000_000, "LTV": 0.61, "DSCR": 1.35, "DY": 0.112},
+            {"Client": "Client C", "Property Type": "Multi Family", "Region": "South", "AUM": 510_000_000, "Commitments": 150_000_000, "LTV": 0.60, "DSCR": 1.55, "DY": 0.089},
+            {"Client": "Client C", "Property Type": "Industrial", "Region": "West", "AUM": 275_000_000, "Commitments": 70_000_000, "LTV": 0.56, "DSCR": 1.70, "DY": 0.082},
+        ]
+    )
 
-if uploaded_file and anthropic_key:
-    col_run, col_info = st.columns([1, 3])
-    with col_run:
-        run_btn = st.button("⚙️ Extract & Analyze", use_container_width=True)
-    with col_info:
-        if not perplexity_key:
-            st.info(
-                "Perplexity key not set — a brief market & submarket summary will be generated with Claude "
-                "(general knowledge, not live web data).",
-                icon="ℹ️",
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        clients = ["All", "Client A", "Client B", "Client C"]
+        sel_client = st.selectbox("Clients", clients, index=0)
+    with f2:
+        ptypes = ["All", "Multi Family", "Industrial", "Office", "Hospitality"]
+        sel_ptype = st.selectbox("Property type", ptypes, index=0)
+    with f3:
+        regions = ["All", "Northeast", "South", "Midwest", "West"]
+        sel_region = st.selectbox("Region", regions, index=0)
+    with f4:
+        status_opts = ["All", "Active", "Watch"]
+        sel_status = st.selectbox("Status", status_opts, index=0)
+
+    df = pm_data.copy()
+    if sel_client != "All":
+        df = df[df["Client"] == sel_client]
+    if sel_ptype != "All":
+        df = df[df["Property Type"] == sel_ptype]
+    if sel_region != "All":
+        df = df[df["Region"] == sel_region]
+    # status is a placeholder filter in this demo; keep it interactive without changing data
+    _ = sel_status
+
+    import altair as alt
+
+    def _donut_chart(counts: pd.DataFrame, title: str, color_col: str):
+        base = (
+            alt.Chart(counts)
+            .mark_arc(innerRadius=55, outerRadius=90)
+            .encode(
+                theta=alt.Theta("count:Q"),
+                color=alt.Color(
+                    f"{color_col}:N",
+                    scale=alt.Scale(
+                        range=["#f0c040", "#2d5986", "#7a9cbf", "#c9a227", "#1e3a5f"]
+                    ),
+                    legend=None,
+                ),
+                tooltip=[color_col, "count"],
             )
+            .properties(title=title, width=260, height=220)
+        )
+        return base
 
-    if run_btn:
-        with st.status("🔍 Processing your OM…", expanded=True) as status:
+    if df.empty:
+        st.warning("No results for the selected filters.")
+        prop_counts = pd.DataFrame({"Property Type": ["N/A"], "count": [1]})
+        region_counts = pd.DataFrame({"Region": ["N/A"], "count": [1]})
+    else:
+        prop_counts = df.groupby("Property Type", as_index=False).size().rename(columns={"size": "count"})
+        region_counts = df.groupby("Region", as_index=False).size().rename(columns={"size": "count"})
 
-            # 1. PDF text
-            st.write("📃 Extracting PDF text…")
-            pdf_bytes = uploaded_file.read()
-            pdf_text = extract_pdf_text(pdf_bytes)
-            st.session_state["pdf_text"] = pdf_text
-            st.session_state["stored_files"].append(
-                {
-                    "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                    "filename": uploaded_file.name,
-                    "pdf_bytes": pdf_bytes,
-                }
-            )
-            st.session_state["stored_files"] = st.session_state["stored_files"][-10:]
+    c_chart1, c_chart2, c_summary = st.columns([1, 1, 1.1])
+    with c_chart1:
+        st.altair_chart(_donut_chart(prop_counts, "Property type", "Property Type"), use_container_width=True)
+    with c_chart2:
+        st.altair_chart(_donut_chart(region_counts, "Region", "Region"), use_container_width=True)
+    with c_summary:
+        total_aum = float(df["AUM"].sum()) if not df.empty else 0.0
+        total_commit = float(df["Commitments"].sum()) if not df.empty else 0.0
+        avg_ltv = float((df["LTV"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
+        w_dscr = float((df["DSCR"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
+        w_dy = float((df["DY"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
 
-            # 2. Anthropic extraction
-            st.write("🤖 Sending to Claude 3.5 Sonnet for structured extraction…")
-            try:
-                extracted = extract_with_anthropic(pdf_text, anthropic_key)
-                st.session_state["extracted"] = extracted
-                st.write(f"✅ Extracted {len([k for k,v in extracted.items() if v is not None])} fields.")
-            except Exception as e:
-                st.error(f"Anthropic extraction failed: {e}")
-                st.stop()
+        summary = pd.DataFrame(
+            {
+                "Metric": [
+                    "Total AUM",
+                    "Total commitments",
+                    "Average LTV",
+                    "Weighted DSCR",
+                    "Weighted DY",
+                ],
+                "Value": [
+                    fmt_currency(total_aum),
+                    fmt_currency(total_commit),
+                    fmt_percent(avg_ltv),
+                    f"{w_dscr:.2f}" if w_dscr else "N/A",
+                    fmt_percent(w_dy),
+                ],
+            }
+        )
+        st.markdown("#### Summary")
+        st.dataframe(summary, use_container_width=True, hide_index=True)
 
-            # 3. Market intelligence (Perplexity, or Claude fallback)
-            city  = extracted.get("city", "")  or ""
-            state = extracted.get("state", "") or ""
-            ptype = extracted.get("property_type", "Commercial") or "Commercial"
+    st.markdown("---")
+    st.markdown("#### Watch Monitor")
+    watch_df = pd.DataFrame(
+        [
+            {
+                "Loan name": "Sunset Apartments – Senior Loan",
+                "Balance": "$38,500,000",
+                "Property type": "Multi Family",
+                "LTV": "66%",
+                "DSCR": "1.25x",
+                "DY": "10.1%",
+                "Subject Property Occupancy": "92%",
+                "Market Occupancy": "94%",
+                "FWD Yr rollover": "18%",
+            },
+            {
+                "Loan name": "Riverbend Logistics – Bridge",
+                "Balance": "$52,000,000",
+                "Property type": "Industrial",
+                "LTV": "58%",
+                "DSCR": "1.48x",
+                "DY": "8.6%",
+                "Subject Property Occupancy": "96%",
+                "Market Occupancy": "95%",
+                "FWD Yr rollover": "9%",
+            },
+            {
+                "Loan name": "Central Plaza – Refi",
+                "Balance": "$44,250,000",
+                "Property type": "Office",
+                "LTV": "71%",
+                "DSCR": "1.12x",
+                "DY": "11.4%",
+                "Subject Property Occupancy": "84%",
+                "Market Occupancy": "88%",
+                "FWD Yr rollover": "27%",
+            },
+        ]
+    )
+    if sel_ptype != "All":
+        watch_df = watch_df[watch_df["Property type"] == sel_ptype]
+    st.dataframe(watch_df, use_container_width=True, hide_index=True)
 
-            if city and state:
-                if perplexity_key:
-                    st.write(f"🌐 Fetching market intelligence for {ptype} in {city}, {state}…")
-                    try:
-                        market = get_perplexity_research(city, state, ptype, perplexity_key)
-                        st.session_state["market"] = market
-                        st.write(f"✅ Market data received. {len(market.get('comps',[]))} comps parsed.")
-                    except Exception as e:
-                        st.warning(f"Perplexity unavailable ({e}). Using Claude for market & submarket summary.")
-                        try:
-                            market = get_claude_market_summary(city, state, ptype, extracted, anthropic_key)
-                            st.session_state["market"] = market
-                            st.write("✅ Claude market summary ready (general knowledge, not live data).")
-                        except Exception as ce:
-                            st.error(f"Claude market summary failed: {ce}")
-                            st.session_state["market"] = {
-                                "raw_text": f"Perplexity error: {e}\nClaude fallback error: {ce}",
-                                "metrics": {},
-                                "comps": [],
-                                "citations": [],
-                                "city": city,
-                                "state": state,
-                                "property_type": ptype,
-                                "market_source": "error",
-                            }
-                else:
-                    st.write(f"🤖 Generating market & submarket summary with Claude for {ptype} in {city}, {state}…")
-                    try:
-                        market = get_claude_market_summary(city, state, ptype, extracted, anthropic_key)
-                        st.session_state["market"] = market
-                        st.write("✅ Claude market summary ready (general knowledge, not live data).")
-                    except Exception as e:
-                        st.error(f"Claude market summary failed: {e}")
-                        st.session_state["market"] = None
-            else:
-                st.warning("City/State not found in OM — skipping market research.")
-                st.session_state["market"] = None
+    st.markdown("#### All Commitments")
+    all_commit_cols = list(watch_df.columns)
+    all_commit_df = pd.DataFrame(columns=all_commit_cols)
+    st.dataframe(all_commit_df, use_container_width=True, hide_index=True)
 
-            st.session_state["excel_bytes"] = None  # reset on new run
-            status.update(label="✅ Analysis complete!", state="complete")
-            completion_pct, confidence_score, suggestion = compute_extraction_scores(extracted)
-            st.session_state["file_log"].append(
-                {
-                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Filename": uploaded_file.name,
-                    "Property Name (Extracted)": extracted.get("property_name") or "N/A",
-                    "Confidence Score": f"{confidence_score}% (completion {completion_pct}%)",
-                    "Suggested Prompt Addition/correction": suggestion,
-                }
-            )
-            st.session_state["file_log"] = st.session_state["file_log"][-50:]
-
-elif uploaded_file and not anthropic_key:
-    st.warning("Please enter your Anthropic API key in the sidebar to begin.", icon="🔑")
+elif page == "Market Intelligence":
+    st.markdown("### 🌐 Market Intelligence")
+    st.info("Placeholder tab — integrate live market insights here.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESULTS
 # ─────────────────────────────────────────────────────────────────────────────
-if st.session_state["extracted"]:
+if page == "Underwriting" and st.session_state["extracted"]:
     extracted = st.session_state["extracted"]
     market    = st.session_state["market"]
 
