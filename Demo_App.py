@@ -126,7 +126,7 @@ st.markdown(
         border: 1px solid #1e3a5f;
         border-radius: 10px;
         padding: 10px 10px;
-        margin: 0px 0px 8px 0px;
+        margin: 0px 4px 8px 4px;
         transition: all .15s ease-in-out;
     }
     section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"]:hover {
@@ -1088,7 +1088,8 @@ elif page == "Portfolio Management":
                 ),
                 tooltip=[color_col, "count"],
             )
-            .properties(title=title, width=260, height=220)
+            .properties(title=title, width=260, height=230)
+            .configure_title(anchor="middle", fontSize=13, dy=10)
         )
         return base
 
@@ -1100,14 +1101,15 @@ elif page == "Portfolio Management":
         prop_counts = df.groupby("Property Type", as_index=False).size().rename(columns={"size": "count"})
         region_counts = df.groupby("Region", as_index=False).size().rename(columns={"size": "count"})
 
-    c_chart1, c_chart2, c_summary = st.columns([1, 1, 1.1])
+    st.markdown("<br>", unsafe_allow_html=True)
+    c_chart1, c_chart2, c_summary = st.columns([1, 1, 1.1], vertical_alignment="top")
     with c_chart1:
         st.altair_chart(_donut_chart(prop_counts, "Property type", "Property Type"), use_container_width=True)
     with c_chart2:
         st.altair_chart(_donut_chart(region_counts, "Region", "Region"), use_container_width=True)
     with c_summary:
-        total_aum = float(df["AUM"].sum()) if not df.empty else 0.0
-        total_commit = float(df["Commitments"].sum()) if not df.empty else 0.0
+        raw_total_aum = float(df["AUM"].sum()) if not df.empty else 0.0
+        total_aum = min(3_200_000_000.0, raw_total_aum)  # cap at 3.2B
         avg_ltv = float((df["LTV"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
         w_dscr = float((df["DSCR"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
         w_dy = float((df["DY"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
@@ -1115,15 +1117,15 @@ elif page == "Portfolio Management":
         summary = pd.DataFrame(
             {
                 "Metric": [
-                    "Total AUM",
-                    "Total commitments",
+                    "Total AUM (max 3.2B)",
+                    "Total Loans",
                     "Average LTV",
                     "Weighted DSCR",
                     "Weighted DY",
                 ],
                 "Value": [
                     fmt_currency(total_aum),
-                    fmt_currency(total_commit),
+                    "80",
                     fmt_percent(avg_ltv),
                     f"{w_dscr:.2f}" if w_dscr else "N/A",
                     fmt_percent(w_dy),
@@ -1174,16 +1176,90 @@ elif page == "Portfolio Management":
     )
     if sel_ptype != "All":
         watch_df = watch_df[watch_df["Property type"] == sel_ptype]
-    st.dataframe(watch_df, use_container_width=True, hide_index=True)
+    st.dataframe(
+        watch_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Loan name": st.column_config.TextColumn(width=280),
+        },
+    )
 
     st.markdown("#### All Commitments")
     all_commit_cols = list(watch_df.columns)
     all_commit_df = pd.DataFrame(columns=all_commit_cols)
-    st.dataframe(all_commit_df, use_container_width=True, hide_index=True)
+    st.dataframe(
+        all_commit_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Loan name": st.column_config.TextColumn(width=280),
+        },
+    )
 
 elif page == "Market Intelligence":
     st.markdown("### 🌐 Market Intelligence")
-    st.info("Placeholder tab — integrate live market insights here.")
+
+    c_zip, c_ptype, c_btn = st.columns([1.1, 1.2, 0.7])
+    with c_zip:
+        mi_postal = st.text_input(" ", value="", placeholder="Postal Code", label_visibility="collapsed")
+    with c_ptype:
+        mi_ptype = st.selectbox(
+            "Property type",
+            ["Multi Family", "Industrial", "Office", "Hospitality"],
+            index=0,
+        )
+    with c_btn:
+        mi_run = st.button("Run", use_container_width=True)
+
+    if mi_run and mi_postal.strip():
+        st.markdown("---")
+        st.markdown("#### Market & Submarket Trends")
+        st.markdown(
+            f"""
+**Location**: {mi_postal.strip()}  ·  **Property type**: {mi_ptype}
+
+- **Current market conditions**: Leasing velocity is healthy with stable to modestly rising asking rents, while capital remains selective and focused on well-sponsored transactions. Lender underwriting is emphasizing in-place cash flow, rollover timing, and business-plan execution risk.
+- **Submarket dynamics**: Nearby assets are competing primarily on amenity quality and tenant improvement packages, with new supply clustered around the most transit- and amenity-rich nodes. Occupancy at institutional assets is trending slightly above the broader market, but backfill risk exists for older, less renovated product.
+- **Forward-looking view (12–24 months)**: Base case assumes muted but positive rent growth, modest cap-rate expansion, and continued bifurcation between prime locations and secondary corridors. Downside scenarios focus on tighter debt markets and slower lease-up; upside scenarios depend on faster-than-expected absorption and limited incremental supply.
+"""
+        )
+
+        st.markdown("#### Relevant Assets")
+        relevant_df = pd.DataFrame(
+            [
+                {
+                    "Loan name": "Subject – Benchmark 1",
+                    "Balance": "$42,000,000",
+                    "Property type": mi_ptype,
+                    "LTV": "63%",
+                    "DSCR": "1.35x",
+                    "DY": "9.4%",
+                    "Subject Property Occupancy": "95%",
+                    "Market Occupancy": "93%",
+                    "FWD Yr rollover": "14%",
+                },
+                {
+                    "Loan name": "Subject – Benchmark 2",
+                    "Balance": "$35,500,000",
+                    "Property type": mi_ptype,
+                    "LTV": "59%",
+                    "DSCR": "1.42x",
+                    "DY": "8.9%",
+                    "Subject Property Occupancy": "92%",
+                    "Market Occupancy": "91%",
+                    "FWD Yr rollover": "11%",
+                },
+            ]
+        )
+        st.dataframe(
+            relevant_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Loan name": st.column_config.TextColumn(width=280),
+            },
+        )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESULTS
