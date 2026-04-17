@@ -80,8 +80,8 @@ st.markdown(
         margin-left:6px;
     }
 
-    /* ── Headers ── */
-    h1, h2, h3 { color: #e8f0fe !important; }
+    /* ── Headers (dark main area default) ── */
+    .main h1, .main h2, .main h3, .main h4 { color: #e8f0fe !important; }
     .hero-title {
         font-size: 2.2rem;
         font-weight: 800;
@@ -89,6 +89,28 @@ st.markdown(
         letter-spacing: -0.5px;
     }
     .hero-sub { font-size: 1rem; color: #7a9cbf; margin-top: -8px; }
+
+    /* ── Light theme: darker headings for readability ── */
+    [data-testid="stAppViewContainer"][data-theme="light"] .main h1,
+    [data-testid="stAppViewContainer"][data-theme="light"] .main h2,
+    [data-testid="stAppViewContainer"][data-theme="light"] .main h3,
+    [data-testid="stAppViewContainer"][data-theme="light"] .main h4 {
+        color: #0a1628 !important;
+    }
+    [data-testid="stAppViewContainer"][data-theme="light"] .hero-title {
+        color: #7a5a00 !important;
+    }
+    [data-testid="stAppViewContainer"][data-theme="light"] .hero-sub {
+        color: #3d4f66 !important;
+    }
+    html[data-theme="light"] .stApp .main h1,
+    html[data-theme="light"] .stApp .main h2,
+    html[data-theme="light"] .stApp .main h3,
+    html[data-theme="light"] .stApp .main h4 {
+        color: #0a1628 !important;
+    }
+    html[data-theme="light"] .stApp .hero-title { color: #7a5a00 !important; }
+    html[data-theme="light"] .stApp .hero-sub { color: #3d4f66 !important; }
 
     /* ── Expander ── */
     .streamlit-expanderHeader {
@@ -1243,16 +1265,30 @@ elif page == "Portfolio Management":
 elif page == "Market Intelligence":
     st.markdown("### 🌐 Market Intelligence")
 
-    c_zip, c_ptype, c_btn = st.columns([1.1, 1.2, 0.7])
-    with c_zip:
-        mi_postal = st.text_input(" ", value="", placeholder="Postal Code", label_visibility="collapsed")
-    with c_ptype:
+    hdr_zip, hdr_ptype, hdr_btn = st.columns([1.1, 1.2, 0.7], vertical_alignment="bottom")
+    with hdr_zip:
+        st.markdown("**Postal Code**")
+    with hdr_ptype:
+        st.markdown("**Property type**")
+    with hdr_btn:
+        st.markdown("")  # align with label row above Run button
+
+    row_zip, row_ptype, row_btn = st.columns([1.1, 1.2, 0.7], vertical_alignment="center")
+    with row_zip:
+        mi_postal = st.text_input(
+            "postal_code_mi",
+            value="",
+            placeholder="Enter Here",
+            label_visibility="collapsed",
+        )
+    with row_ptype:
         mi_ptype = st.selectbox(
-            "Property type",
+            "property_type_mi",
             ["Multi Family", "Industrial", "Office", "Hospitality"],
             index=0,
+            label_visibility="collapsed",
         )
-    with c_btn:
+    with row_btn:
         mi_run = st.button("Run", use_container_width=True)
 
     if mi_run and mi_postal.strip():
