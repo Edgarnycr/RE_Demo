@@ -224,7 +224,7 @@ def _is_valid_invite(code: str) -> bool:
 
 
 def _admin_access_code() -> str:
-    return _secrets_get("ADMIN_ACCESS_CODE", "EDGAR_ADMIN")
+    return _secrets_get("ADMIN_ACCESS_CODE")
 
 
 def effective_anthropic_key() -> str:
