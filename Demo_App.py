@@ -175,15 +175,99 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECRETS — API keys (server) + invite-only access
+# ─────────────────────────────────────────────────────────────────────────────
+def _secrets_get(key: str, default: str = "") -> str:
+    try:
+        val = st.secrets[key]
+        if val is None:
+            return default
+        return str(val).strip()
+    except Exception:
+        return default
+
+
+def _get_invite_codes() -> set[str]:
+    """
+    Valid invite passwords from Streamlit secrets.
+    Use APP_INVITE_CODES as a TOML list, or a single comma-separated string,
+    or a single APP_INVITE_CODE string.
+    """
+    codes: set[str] = set()
+    try:
+        if "APP_INVITE_CODES" in st.secrets:
+            raw = st.secrets["APP_INVITE_CODES"]
+            if isinstance(raw, (list, tuple)):
+                codes = {str(x).strip() for x in raw if str(x).strip()}
+            else:
+                s = str(raw).strip()
+                if s:
+                    codes = {p.strip() for p in s.split(",") if p.strip()}
+        if "APP_INVITE_CODE" in st.secrets:
+            one = str(st.secrets["APP_INVITE_CODE"]).strip()
+            if one:
+                codes.add(one)
+    except Exception:
+        pass
+    return codes
+
+
+def _is_valid_invite(code: str) -> bool:
+    if not code or not code.strip():
+        return False
+    invite_codes = _get_invite_codes()
+    if not invite_codes:
+        return False
+    return code.strip() in invite_codes
+
+
+def _admin_access_code() -> str:
+    return _secrets_get("ADMIN_ACCESS_CODE", "EDGAR_ADMIN")
+
+
+def effective_anthropic_key() -> str:
+    return _secrets_get("ANTHROPIC_API_KEY") or (st.session_state.get("anthropic_key") or "")
+
+
+def effective_perplexity_key() -> str:
+    return _secrets_get("PERPLEXITY_API_KEY") or (st.session_state.get("perplexity_key") or "")
+
+
+INVITE_ONLY_MSG = (
+    "This app is **invite-only**. Enter the access code you were given in **Client ID / Access Code** "
+    "in the sidebar to use this section."
+)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR  —  Client auth + Navigation + Developer tools
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    # Client-level access control
+    # Invite-only access (password in this field unlocks the app for the session)
     st.markdown("### Client Access")
-    client_id = st.text_input("Client ID / Access Code", type="password")
-    if client_id:
-        st.session_state["user_folder"] = client_id.strip()
+    client_id = st.text_input(
+        "Client ID / Access Code",
+        type="password",
+        help="Enter the invite code you were given. This is required to use the app.",
+    )
+    entered = (client_id or "").strip()
+    if entered:
+        if _is_valid_invite(entered):
+            st.session_state["access_granted"] = True
+            st.session_state["user_folder"] = entered
+        else:
+            st.session_state["access_granted"] = False
+            st.session_state["user_folder"] = None
+            st.sidebar.error("Invalid access code.")
+    else:
+        st.session_state["access_granted"] = False
+        st.session_state["user_folder"] = None
+
+    if not _get_invite_codes():
+        st.caption("Deploy: set `APP_INVITE_CODES` (and API keys) in Streamlit Secrets.")
+
     st.markdown("---")
 
     st.markdown("## Navigation")
@@ -872,10 +956,21 @@ def build_excel(extracted: dict, market: dict) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
-for key in ["extracted", "market", "excel_bytes", "pdf_text", "file_log", "stored_files", "user_folder"]:
+for key in [
+    "extracted",
+    "market",
+    "excel_bytes",
+    "pdf_text",
+    "file_log",
+    "stored_files",
+    "user_folder",
+    "access_granted",
+]:
     if key not in st.session_state:
         if key in {"file_log", "stored_files"}:
             st.session_state[key] = []
+        elif key == "access_granted":
+            st.session_state[key] = False
         else:
             st.session_state[key] = None
 
@@ -884,6 +979,8 @@ for key in ["extracted", "market", "excel_bytes", "pdf_text", "file_log", "store
 # ─────────────────────────────────────────────────────────────────────────────
 def _store_uploaded_pdf(uploaded_file_obj) -> Optional[Dict[str, Any]]:
     if uploaded_file_obj is None:
+        return None
+    if not st.session_state.get("access_granted"):
         return None
     pdf_bytes = uploaded_file_obj.getvalue()
     file_id = f"{uploaded_file_obj.name}:{len(pdf_bytes)}"
@@ -903,70 +1000,95 @@ def _store_uploaded_pdf(uploaded_file_obj) -> Optional[Dict[str, Any]]:
 
 
 if page == "Underwriting":
-    anthropic_key = st.session_state.get("anthropic_key", "")
-    perplexity_key = st.session_state.get("perplexity_key", "")
+    if not st.session_state.get("access_granted"):
+        st.warning(INVITE_ONLY_MSG + " Upload and extraction require a valid invite.", icon="🔒")
+    else:
+        anthropic_key = effective_anthropic_key()
+        perplexity_key = effective_perplexity_key()
 
-    st.markdown("### 📄 Upload Broker Offering Memorandum")
-    uploaded_file = st.file_uploader(
-        "Drag & drop or click to upload a PDF",
-        type=["pdf"],
-        label_visibility="collapsed",
-        key="broker_om_uploader",
-    )
-    stored_entry = _store_uploaded_pdf(uploaded_file)
+        st.markdown("### 📄 Upload Broker Offering Memorandum")
+        uploaded_file = st.file_uploader(
+            "Drag & drop or click to upload a PDF",
+            type=["pdf"],
+            label_visibility="collapsed",
+            key="broker_om_uploader",
+        )
+        stored_entry = _store_uploaded_pdf(uploaded_file)
 
-    if uploaded_file and anthropic_key:
-        col_run, col_info = st.columns([1, 3])
-        with col_run:
-            run_btn = st.button("⚙️ Extract & Analyze", use_container_width=True)
-        with col_info:
-            if not perplexity_key:
-                st.info(
-                    "Perplexity key not set — a brief market & submarket summary will be generated with Claude "
-                    "(general knowledge, not live web data).",
-                    icon="ℹ️",
-                )
-
-        if run_btn:
-            with st.status("🔍 Processing your OM…", expanded=True) as status:
-
-                # 1. PDF text
-                st.write("📃 Extracting PDF text…")
-                pdf_bytes = stored_entry["pdf_bytes"] if stored_entry else uploaded_file.getvalue()
-                pdf_text = extract_pdf_text(pdf_bytes)
-                st.session_state["pdf_text"] = pdf_text
-
-                # 2. Anthropic extraction
-                st.write("🤖 Sending to Claude 3.5 Sonnet for structured extraction…")
-                try:
-                    extracted = extract_with_anthropic(pdf_text, anthropic_key)
-                    st.session_state["extracted"] = extracted
-                    st.write(
-                        f"✅ Extracted {len([k for k, v in extracted.items() if v is not None])} fields."
+        if uploaded_file and anthropic_key:
+            col_run, col_info = st.columns([1, 3])
+            with col_run:
+                run_btn = st.button("⚙️ Extract & Analyze", use_container_width=True)
+            with col_info:
+                if not perplexity_key:
+                    st.info(
+                        "Perplexity key not set — a brief market & submarket summary will be generated with Claude "
+                        "(general knowledge, not live web data).",
+                        icon="ℹ️",
                     )
-                except Exception as e:
-                    st.error(f"Anthropic extraction failed: {e}")
-                    st.stop()
 
-                # 3. Market intelligence (Perplexity, or Claude fallback)
-                city = extracted.get("city", "") or ""
-                state = extracted.get("state", "") or ""
-                ptype = extracted.get("property_type", "Commercial") or "Commercial"
+            if run_btn:
+                with st.status("🔍 Processing your OM…", expanded=True) as status:
 
-                if city and state:
-                    if perplexity_key:
+                    # 1. PDF text
+                    st.write("📃 Extracting PDF text…")
+                    pdf_bytes = stored_entry["pdf_bytes"] if stored_entry else uploaded_file.getvalue()
+                    pdf_text = extract_pdf_text(pdf_bytes)
+                    st.session_state["pdf_text"] = pdf_text
+
+                    # 2. Anthropic extraction
+                    st.write("🤖 Sending to Claude 3.5 Sonnet for structured extraction…")
+                    try:
+                        extracted = extract_with_anthropic(pdf_text, anthropic_key)
+                        st.session_state["extracted"] = extracted
                         st.write(
-                            f"🌐 Fetching market intelligence for {ptype} in {city}, {state}…"
+                            f"✅ Extracted {len([k for k, v in extracted.items() if v is not None])} fields."
                         )
-                        try:
-                            market = get_perplexity_research(city, state, ptype, perplexity_key)
-                            st.session_state["market"] = market
+                    except Exception as e:
+                        st.error(f"Anthropic extraction failed: {e}")
+                        st.stop()
+
+                    # 3. Market intelligence (Perplexity, or Claude fallback)
+                    city = extracted.get("city", "") or ""
+                    state = extracted.get("state", "") or ""
+                    ptype = extracted.get("property_type", "Commercial") or "Commercial"
+
+                    if city and state:
+                        if perplexity_key:
                             st.write(
-                                f"✅ Market data received. {len(market.get('comps', []))} comps parsed."
+                                f"🌐 Fetching market intelligence for {ptype} in {city}, {state}…"
                             )
-                        except Exception as e:
-                            st.warning(
-                                f"Perplexity unavailable ({e}). Using Claude for market & submarket summary."
+                            try:
+                                market = get_perplexity_research(city, state, ptype, perplexity_key)
+                                st.session_state["market"] = market
+                                st.write(
+                                    f"✅ Market data received. {len(market.get('comps', []))} comps parsed."
+                                )
+                            except Exception as e:
+                                st.warning(
+                                    f"Perplexity unavailable ({e}). Using Claude for market & submarket summary."
+                                )
+                                try:
+                                    market = get_claude_market_summary(
+                                        city, state, ptype, extracted, anthropic_key
+                                    )
+                                    st.session_state["market"] = market
+                                    st.write("✅ Claude market summary ready (general knowledge, not live data).")
+                                except Exception as ce:
+                                    st.error(f"Claude market summary failed: {ce}")
+                                    st.session_state["market"] = {
+                                        "raw_text": f"Perplexity error: {e}\nClaude fallback error: {ce}",
+                                        "metrics": {},
+                                        "comps": [],
+                                        "citations": [],
+                                        "city": city,
+                                        "state": state,
+                                        "property_type": ptype,
+                                        "market_source": "error",
+                                    }
+                        else:
+                            st.write(
+                                f"🤖 Generating market & submarket summary with Claude for {ptype} in {city}, {state}…"
                             )
                             try:
                                 market = get_claude_market_summary(
@@ -974,405 +1096,403 @@ if page == "Underwriting":
                                 )
                                 st.session_state["market"] = market
                                 st.write("✅ Claude market summary ready (general knowledge, not live data).")
-                            except Exception as ce:
-                                st.error(f"Claude market summary failed: {ce}")
-                                st.session_state["market"] = {
-                                    "raw_text": f"Perplexity error: {e}\nClaude fallback error: {ce}",
-                                    "metrics": {},
-                                    "comps": [],
-                                    "citations": [],
-                                    "city": city,
-                                    "state": state,
-                                    "property_type": ptype,
-                                    "market_source": "error",
-                                }
+                            except Exception as e:
+                                st.error(f"Claude market summary failed: {e}")
+                                st.session_state["market"] = None
                     else:
-                        st.write(
-                            f"🤖 Generating market & submarket summary with Claude for {ptype} in {city}, {state}…"
-                        )
-                        try:
-                            market = get_claude_market_summary(
-                                city, state, ptype, extracted, anthropic_key
-                            )
-                            st.session_state["market"] = market
-                            st.write("✅ Claude market summary ready (general knowledge, not live data).")
-                        except Exception as e:
-                            st.error(f"Claude market summary failed: {e}")
-                            st.session_state["market"] = None
+                        st.warning("City/State not found in OM — skipping market research.")
+                        st.session_state["market"] = None
+
+                    st.session_state["excel_bytes"] = None  # reset on new run
+                    status.update(label="✅ Analysis complete!", state="complete")
+                    completion_pct, confidence_score, suggestion = compute_extraction_scores(extracted)
+                    owner = st.session_state.get("user_folder")
+                    st.session_state["file_log"].append(
+                        {
+                            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "Filename": uploaded_file.name,
+                            "Property Name (Extracted)": extracted.get("property_name") or "N/A",
+                            "Confidence Score": f"{confidence_score}% (completion {completion_pct}%)",
+                            "Suggested Prompt Addition/correction": suggestion,
+                            "Owner": owner,
+                        }
+                    )
+                    st.session_state["file_log"] = st.session_state["file_log"][-50:]
+
+        elif uploaded_file and not anthropic_key:
+            st.warning(
+                "Anthropic API key is not configured. Add **ANTHROPIC_API_KEY** to Streamlit Secrets (or use "
+                "**Developer Tools** locally with a valid invite code).",
+                icon="🔑",
+            )
+
+        st.markdown("---")
+        st.markdown("### 🗂️ File Log")
+        st.markdown(
+            "Uploaded PDFs are stored in-memory for this session and can be downloaded any time."
+        )
+
+        user_folder = st.session_state.get("user_folder")
+        is_admin = user_folder == _admin_access_code()
+
+        if not user_folder:
+            st.info("Enter a valid invite access code in the sidebar to view your files.")
+        else:
+            # Filter stored files by owner unless admin
+            if st.session_state["stored_files"]:
+                if is_admin:
+                    visible_files = list(st.session_state["stored_files"])
                 else:
-                    st.warning("City/State not found in OM — skipping market research.")
-                    st.session_state["market"] = None
-
-                st.session_state["excel_bytes"] = None  # reset on new run
-                status.update(label="✅ Analysis complete!", state="complete")
-                completion_pct, confidence_score, suggestion = compute_extraction_scores(extracted)
-                owner = st.session_state.get("user_folder")
-                st.session_state["file_log"].append(
-                    {
-                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "Filename": uploaded_file.name,
-                        "Property Name (Extracted)": extracted.get("property_name") or "N/A",
-                        "Confidence Score": f"{confidence_score}% (completion {completion_pct}%)",
-                        "Suggested Prompt Addition/correction": suggestion,
-                        "Owner": owner,
-                    }
-                )
-                st.session_state["file_log"] = st.session_state["file_log"][-50:]
-
-    elif uploaded_file and not anthropic_key:
-        st.warning("Please enter your Anthropic API key in the sidebar to begin.", icon="🔑")
-
-    st.markdown("---")
-    st.markdown("### 🗂️ File Log")
-    st.markdown(
-        "Uploaded PDFs are stored in-memory for this session and can be downloaded any time."
-    )
-
-    user_folder = st.session_state.get("user_folder")
-    is_admin = user_folder == "EDGAR_ADMIN"
-
-    if not user_folder:
-        st.info("Enter a Client ID in the sidebar to view your files.")
-    else:
-        # Filter stored files by owner unless admin
-        if st.session_state["stored_files"]:
-            if is_admin:
-                visible_files = list(st.session_state["stored_files"])
-            else:
-                visible_files = [
-                    f for f in st.session_state["stored_files"] if f.get("owner") == user_folder
-                ]
-
-            if visible_files:
-                for f in reversed(visible_files):
-                    c1, c2, c3 = st.columns([3, 2, 1])
-                    c1.markdown(f"**{f.get('filename','(untitled)')}**")
-                    c2.markdown(
-                        f"<span style='color:#7a9cbf'>{f.get('timestamp','')}</span>",
-                        unsafe_allow_html=True,
-                    )
-                    c3.download_button(
-                        "Download",
-                        data=f.get("pdf_bytes", b""),
-                        file_name=f.get("filename", "uploaded.pdf"),
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key=f"dl_{f.get('id')}",
-                    )
-            else:
-                st.info("No PDFs uploaded yet for this Client ID.")
-
-        else:
-            st.info("No PDFs uploaded yet.")
-
-        st.markdown("#### Extraction Activity")
-        if st.session_state["file_log"]:
-            log_df = pd.DataFrame(st.session_state["file_log"])
-            if not is_admin:
-                log_df = log_df[log_df["Owner"] == user_folder] if "Owner" in log_df.columns else log_df.iloc[0:0]
-
-            if not log_df.empty:
-                log_df = log_df[
-                    [
-                        "Timestamp",
-                        "Filename",
-                        "Property Name (Extracted)",
-                        "Confidence Score",
-                        "Suggested Prompt Addition/correction",
+                    visible_files = [
+                        f for f in st.session_state["stored_files"] if f.get("owner") == user_folder
                     ]
-                ]
-                st.dataframe(log_df, use_container_width=True, hide_index=True)
+
+                if visible_files:
+                    for f in reversed(visible_files):
+                        c1, c2, c3 = st.columns([3, 2, 1])
+                        c1.markdown(f"**{f.get('filename','(untitled)')}**")
+                        c2.markdown(
+                            f"<span style='color:#7a9cbf'>{f.get('timestamp','')}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        c3.download_button(
+                            "Download",
+                            data=f.get("pdf_bytes", b""),
+                            file_name=f.get("filename", "uploaded.pdf"),
+                            mime="application/pdf",
+                            use_container_width=True,
+                            key=f"dl_{f.get('id')}",
+                        )
+                else:
+                    st.info("No PDFs uploaded yet for this invite code.")
+
             else:
-                st.info("No extractions logged yet for this Client ID.")
-        else:
-            st.info("No extractions logged yet.")
+                st.info("No PDFs uploaded yet.")
+
+            st.markdown("#### Extraction Activity")
+            if st.session_state["file_log"]:
+                log_df = pd.DataFrame(st.session_state["file_log"])
+                if not is_admin:
+                    log_df = (
+                        log_df[log_df["Owner"] == user_folder]
+                        if "Owner" in log_df.columns
+                        else log_df.iloc[0:0]
+                    )
+
+                if not log_df.empty:
+                    log_df = log_df[
+                        [
+                            "Timestamp",
+                            "Filename",
+                            "Property Name (Extracted)",
+                            "Confidence Score",
+                            "Suggested Prompt Addition/correction",
+                        ]
+                    ]
+                    st.dataframe(log_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No extractions logged yet for this invite code.")
+            else:
+                st.info("No extractions logged yet.")
 
 elif page == "Portfolio Management":
-    st.markdown("### 📈 Portfolio Management (Placeholder Dashboard)")
-
-    pm_data = pd.DataFrame(
-        [
-            {"Client": "Client A", "Property Type": "Multi Family", "Region": "Northeast", "AUM": 450_000_000, "Commitments": 120_000_000, "LTV": 0.63, "DSCR": 1.48, "DY": 0.092},
-            {"Client": "Client A", "Property Type": "Industrial", "Region": "South", "AUM": 310_000_000, "Commitments": 80_000_000, "LTV": 0.58, "DSCR": 1.62, "DY": 0.087},
-            {"Client": "Client B", "Property Type": "Office", "Region": "West", "AUM": 220_000_000, "Commitments": 60_000_000, "LTV": 0.67, "DSCR": 1.28, "DY": 0.101},
-            {"Client": "Client B", "Property Type": "Hospitality", "Region": "Midwest", "AUM": 140_000_000, "Commitments": 35_000_000, "LTV": 0.61, "DSCR": 1.35, "DY": 0.112},
-            {"Client": "Client C", "Property Type": "Multi Family", "Region": "South", "AUM": 510_000_000, "Commitments": 150_000_000, "LTV": 0.60, "DSCR": 1.55, "DY": 0.089},
-            {"Client": "Client C", "Property Type": "Industrial", "Region": "West", "AUM": 275_000_000, "Commitments": 70_000_000, "LTV": 0.56, "DSCR": 1.70, "DY": 0.082},
-        ]
-    )
-
-    base_total_aum = float(pm_data["AUM"].sum())
-    scaling_factor = 3_200_000_000.0 / base_total_aum if base_total_aum else 1.0
-
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        clients = ["All", "Client A", "Client B", "Client C"]
-        sel_client = st.selectbox("Clients", clients, index=0)
-    with f2:
-        ptypes = ["All", "Multi Family", "Industrial", "Office", "Hospitality"]
-        sel_ptype = st.selectbox("Property type", ptypes, index=0)
-    with f3:
-        regions = ["All", "Northeast", "South", "Midwest", "West"]
-        sel_region = st.selectbox("Region", regions, index=0)
-    with f4:
-        status_opts = ["All", "Active", "Watch"]
-        sel_status = st.selectbox("Status", status_opts, index=0)
-
-    df = pm_data.copy()
-    if sel_client != "All":
-        df = df[df["Client"] == sel_client]
-    if sel_ptype != "All":
-        df = df[df["Property Type"] == sel_ptype]
-    if sel_region != "All":
-        df = df[df["Region"] == sel_region]
-    # status is a placeholder filter in this demo; keep it interactive without changing data
-    _ = sel_status
-
-    import altair as alt
-
-    def _donut_chart(counts: pd.DataFrame, title: str, color_col: str):
-        base = (
-            alt.Chart(counts)
-            .mark_arc(innerRadius=55, outerRadius=90)
-            .encode(
-                theta=alt.Theta("count:Q"),
-                color=alt.Color(
-                    f"{color_col}:N",
-                    scale=alt.Scale(
-                        range=["#f0c040", "#2d5986", "#7a9cbf", "#c9a227", "#1e3a5f"]
-                    ),
-                    legend=None,
-                ),
-                tooltip=[color_col, "count"],
-            )
-            .properties(title=title, width=260, height=230)
-            .configure_title(anchor="middle", fontSize=13, dy=10)
-        )
-        return base
-
-    if df.empty:
-        st.warning("No results for the selected filters.")
-        prop_counts = pd.DataFrame({"Property Type": ["N/A"], "count": [1]})
-        region_counts = pd.DataFrame({"Region": ["N/A"], "count": [1]})
+    if not st.session_state.get("access_granted"):
+        st.warning(INVITE_ONLY_MSG, icon="🔒")
     else:
-        prop_counts = df.groupby("Property Type", as_index=False).size().rename(columns={"size": "count"})
-        region_counts = df.groupby("Region", as_index=False).size().rename(columns={"size": "count"})
+        st.markdown("### 📈 Portfolio Management (Placeholder Dashboard)")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    c_chart1, c_chart2, c_summary = st.columns([1, 1, 1.1], vertical_alignment="top")
-    with c_chart1:
-        st.markdown(
-            "<div style='text-align:center'><h4 style='margin-bottom:4px'>Property type</h4></div>",
-            unsafe_allow_html=True,
+        pm_data = pd.DataFrame(
+            [
+                {"Client": "Client A", "Property Type": "Multi Family", "Region": "Northeast", "AUM": 450_000_000, "Commitments": 120_000_000, "LTV": 0.63, "DSCR": 1.48, "DY": 0.092},
+                {"Client": "Client A", "Property Type": "Industrial", "Region": "South", "AUM": 310_000_000, "Commitments": 80_000_000, "LTV": 0.58, "DSCR": 1.62, "DY": 0.087},
+                {"Client": "Client B", "Property Type": "Office", "Region": "West", "AUM": 220_000_000, "Commitments": 60_000_000, "LTV": 0.67, "DSCR": 1.28, "DY": 0.101},
+                {"Client": "Client B", "Property Type": "Hospitality", "Region": "Midwest", "AUM": 140_000_000, "Commitments": 35_000_000, "LTV": 0.61, "DSCR": 1.35, "DY": 0.112},
+                {"Client": "Client C", "Property Type": "Multi Family", "Region": "South", "AUM": 510_000_000, "Commitments": 150_000_000, "LTV": 0.60, "DSCR": 1.55, "DY": 0.089},
+                {"Client": "Client C", "Property Type": "Industrial", "Region": "West", "AUM": 275_000_000, "Commitments": 70_000_000, "LTV": 0.56, "DSCR": 1.70, "DY": 0.082},
+            ]
         )
-        st.altair_chart(_donut_chart(prop_counts, "", "Property Type"), use_container_width=True)
-    with c_chart2:
-        st.markdown(
-            "<div style='text-align:center'><h4 style='margin-bottom:4px'>Region</h4></div>",
-            unsafe_allow_html=True,
-        )
-        st.altair_chart(_donut_chart(region_counts, "", "Region"), use_container_width=True)
-    with c_summary:
-        raw_total_aum = float(df["AUM"].sum()) if not df.empty else 0.0
-        total_aum = raw_total_aum * scaling_factor if raw_total_aum else 0.0
-        avg_ltv = float((df["LTV"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
-        w_dscr = float((df["DSCR"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
-        w_dy = float((df["DY"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
 
-        summary = pd.DataFrame(
-            {
-                "Metric": [
-                    "Total AUM",
-                    "Total Loans",
-                    "Average LTV",
-                    "Weighted DSCR",
-                    "Weighted DY",
-                ],
-                "Value": [
-                    fmt_currency(total_aum),
-                    "80",
-                    fmt_percent(avg_ltv),
-                    f"{w_dscr:.2f}" if w_dscr else "N/A",
-                    fmt_percent(w_dy),
-                ],
-            }
-        )
-        st.markdown("#### Summary")
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+        base_total_aum = float(pm_data["AUM"].sum())
+        scaling_factor = 3_200_000_000.0 / base_total_aum if base_total_aum else 1.0
 
-    st.markdown("---")
-    st.markdown("#### Watch Monitor")
-    watch_df = pd.DataFrame(
-        [
-            {
-                "Loan name": "Sunset Apartments – Senior Loan",
-                "Balance": "$38,500,000",
-                "Property type": "Multi Family",
-                "LTV": "66%",
-                "DSCR": "1.25x",
-                "DY": "10.1%",
-                "Subject Property Occupancy": "92%",
-                "Market Occupancy": "94%",
-                "FWD Yr rollover": "18%",
-            },
-            {
-                "Loan name": "Riverbend Logistics – Bridge",
-                "Balance": "$52,000,000",
-                "Property type": "Industrial",
-                "LTV": "58%",
-                "DSCR": "1.48x",
-                "DY": "8.6%",
-                "Subject Property Occupancy": "96%",
-                "Market Occupancy": "95%",
-                "FWD Yr rollover": "9%",
-            },
-            {
-                "Loan name": "Central Plaza – Refi",
-                "Balance": "$44,250,000",
-                "Property type": "Office",
-                "LTV": "71%",
-                "DSCR": "1.12x",
-                "DY": "11.4%",
-                "Subject Property Occupancy": "84%",
-                "Market Occupancy": "88%",
-                "FWD Yr rollover": "27%",
-            },
-        ]
-    )
-    if sel_ptype != "All":
-        watch_df = watch_df[watch_df["Property type"] == sel_ptype]
-    st.dataframe(
-        watch_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Loan name": st.column_config.TextColumn(width=280),
-        },
-    )
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            clients = ["All", "Client A", "Client B", "Client C"]
+            sel_client = st.selectbox("Clients", clients, index=0)
+        with f2:
+            ptypes = ["All", "Multi Family", "Industrial", "Office", "Hospitality"]
+            sel_ptype = st.selectbox("Property type", ptypes, index=0)
+        with f3:
+            regions = ["All", "Northeast", "South", "Midwest", "West"]
+            sel_region = st.selectbox("Region", regions, index=0)
+        with f4:
+            status_opts = ["All", "Active", "Watch"]
+            sel_status = st.selectbox("Status", status_opts, index=0)
 
-    st.markdown("#### All Commitments")
-    all_commit_cols = list(watch_df.columns)
-    all_commit_df = pd.DataFrame(columns=all_commit_cols)
-    st.dataframe(
-        all_commit_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Loan name": st.column_config.TextColumn(width=280),
-        },
-    )
+        df = pm_data.copy()
+        if sel_client != "All":
+            df = df[df["Client"] == sel_client]
+        if sel_ptype != "All":
+            df = df[df["Property Type"] == sel_ptype]
+        if sel_region != "All":
+            df = df[df["Region"] == sel_region]
+        # status is a placeholder filter in this demo; keep it interactive without changing data
+        _ = sel_status
 
-elif page == "Market Intelligence":
-    st.markdown("### 🌐 Market Intelligence")
+        import altair as alt
 
-    hdr_zip, hdr_ptype, hdr_btn = st.columns([1.1, 1.2, 0.7], vertical_alignment="bottom")
-    with hdr_zip:
-        st.markdown("**Postal Code**")
-    with hdr_ptype:
-        st.markdown("**Property type**")
-    with hdr_btn:
-        st.markdown("")  # align with label row above Run button
+        def _donut_chart(counts: pd.DataFrame, title: str, color_col: str):
+            base = (
+                alt.Chart(counts)
+                .mark_arc(innerRadius=55, outerRadius=90)
+                .encode(
+                    theta=alt.Theta("count:Q"),
+                    color=alt.Color(
+                        f"{color_col}:N",
+                        scale=alt.Scale(
+                            range=["#f0c040", "#2d5986", "#7a9cbf", "#c9a227", "#1e3a5f"]
+                        ),
+                        legend=None,
+                    ),
+                    tooltip=[color_col, "count"],
+                )
+                .properties(title=title, width=260, height=230)
+                .configure_title(anchor="middle", fontSize=13, dy=10)
+            )
+            return base
 
-    row_zip, row_ptype, row_btn = st.columns([1.1, 1.2, 0.7], vertical_alignment="center")
-    with row_zip:
-        mi_postal = st.text_input(
-            "postal_code_mi",
-            value="",
-            placeholder="Enter Here",
-            label_visibility="collapsed",
-        )
-    with row_ptype:
-        mi_ptype = st.selectbox(
-            "property_type_mi",
-            ["Multi Family", "Industrial", "Office", "Hospitality"],
-            index=0,
-            label_visibility="collapsed",
-        )
-    with row_btn:
-        mi_run = st.button("Run", use_container_width=True)
+        if df.empty:
+            st.warning("No results for the selected filters.")
+            prop_counts = pd.DataFrame({"Property Type": ["N/A"], "count": [1]})
+            region_counts = pd.DataFrame({"Region": ["N/A"], "count": [1]})
+        else:
+            prop_counts = df.groupby("Property Type", as_index=False).size().rename(columns={"size": "count"})
+            region_counts = df.groupby("Region", as_index=False).size().rename(columns={"size": "count"})
 
-    if mi_run and mi_postal.strip():
+        st.markdown("<br>", unsafe_allow_html=True)
+        c_chart1, c_chart2, c_summary = st.columns([1, 1, 1.1], vertical_alignment="top")
+        with c_chart1:
+            st.markdown(
+                "<div style='text-align:center'><h4 style='margin-bottom:4px'>Property type</h4></div>",
+                unsafe_allow_html=True,
+            )
+            st.altair_chart(_donut_chart(prop_counts, "", "Property Type"), use_container_width=True)
+        with c_chart2:
+            st.markdown(
+                "<div style='text-align:center'><h4 style='margin-bottom:4px'>Region</h4></div>",
+                unsafe_allow_html=True,
+            )
+            st.altair_chart(_donut_chart(region_counts, "", "Region"), use_container_width=True)
+        with c_summary:
+            raw_total_aum = float(df["AUM"].sum()) if not df.empty else 0.0
+            total_aum = raw_total_aum * scaling_factor if raw_total_aum else 0.0
+            avg_ltv = float((df["LTV"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
+            w_dscr = float((df["DSCR"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
+            w_dy = float((df["DY"] * df["AUM"]).sum() / max(df["AUM"].sum(), 1)) if not df.empty else 0.0
+
+            summary = pd.DataFrame(
+                {
+                    "Metric": [
+                        "Total AUM",
+                        "Total Loans",
+                        "Average LTV",
+                        "Weighted DSCR",
+                        "Weighted DY",
+                    ],
+                    "Value": [
+                        fmt_currency(total_aum),
+                        "80",
+                        fmt_percent(avg_ltv),
+                        f"{w_dscr:.2f}" if w_dscr else "N/A",
+                        fmt_percent(w_dy),
+                    ],
+                }
+            )
+            st.markdown("#### Summary")
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+
         st.markdown("---")
-        st.markdown("#### Market & Submarket Trends")
-        st.markdown(
-            f"""
-**Location**: {mi_postal.strip()}  ·  **Property type**: {mi_ptype}
-
-- **Current market conditions**: Leasing velocity is healthy with stable to modestly rising asking rents, while capital remains selective and focused on well-sponsored transactions. Lender underwriting is emphasizing in-place cash flow, rollover timing, and business-plan execution risk.
-- **Submarket dynamics**: Nearby assets are competing primarily on amenity quality and tenant improvement packages, with new supply clustered around the most transit- and amenity-rich nodes. Occupancy at institutional assets is trending slightly above the broader market, but backfill risk exists for older, less renovated product.
-- **Forward-looking view (12–24 months)**: Base case assumes muted but positive rent growth, modest cap-rate expansion, and continued bifurcation between prime locations and secondary corridors. Downside scenarios focus on tighter debt markets and slower lease-up; upside scenarios depend on faster-than-expected absorption and limited incremental supply.
-"""
-        )
-
-        st.markdown("#### Relevant Assets")
-        relevant_df = pd.DataFrame(
+        st.markdown("#### Watch Monitor")
+        watch_df = pd.DataFrame(
             [
                 {
-                    "Loan name": "Subject – Benchmark 1",
-                    "Balance": "$42,000,000",
-                    "Property type": mi_ptype,
-                    "LTV": "63%",
-                    "DSCR": "1.35x",
-                    "DY": "9.4%",
-                    "Subject Property Occupancy": "95%",
-                    "Market Occupancy": "93%",
-                    "FWD Yr rollover": "14%",
+                    "Loan name": "Sunset Apartments – Senior Loan",
+                    "Balance": "$38,500,000",
+                    "Property type": "Multi Family",
+                    "LTV": "66%",
+                    "DSCR": "1.25x",
+                    "DY": "10.1%",
+                    "Subject Property Occupancy": "92%",
+                    "Market Occupancy": "94%",
+                    "FWD Yr rollover": "18%",
                 },
                 {
-                    "Loan name": "Subject – Benchmark 2",
-                    "Balance": "$35,500,000",
-                    "Property type": mi_ptype,
-                    "LTV": "59%",
-                    "DSCR": "1.42x",
-                    "DY": "8.9%",
-                    "Subject Property Occupancy": "92%",
-                    "Market Occupancy": "91%",
-                    "FWD Yr rollover": "11%",
+                    "Loan name": "Riverbend Logistics – Bridge",
+                    "Balance": "$52,000,000",
+                    "Property type": "Industrial",
+                    "LTV": "58%",
+                    "DSCR": "1.48x",
+                    "DY": "8.6%",
+                    "Subject Property Occupancy": "96%",
+                    "Market Occupancy": "95%",
+                    "FWD Yr rollover": "9%",
+                },
+                {
+                    "Loan name": "Central Plaza – Refi",
+                    "Balance": "$44,250,000",
+                    "Property type": "Office",
+                    "LTV": "71%",
+                    "DSCR": "1.12x",
+                    "DY": "11.4%",
+                    "Subject Property Occupancy": "84%",
+                    "Market Occupancy": "88%",
+                    "FWD Yr rollover": "27%",
                 },
             ]
         )
+        if sel_ptype != "All":
+            watch_df = watch_df[watch_df["Property type"] == sel_ptype]
         st.dataframe(
-            relevant_df,
+            watch_df,
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Loan name": st.column_config.TextColumn(width=280),
             },
         )
+
+        st.markdown("#### All Commitments")
+        all_commit_cols = list(watch_df.columns)
+        all_commit_df = pd.DataFrame(columns=all_commit_cols)
+        st.dataframe(
+            all_commit_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Loan name": st.column_config.TextColumn(width=280),
+            },
+        )
+
+elif page == "Market Intelligence":
+    if not st.session_state.get("access_granted"):
+        st.warning(INVITE_ONLY_MSG, icon="🔒")
+    else:
+        st.markdown("### 🌐 Market Intelligence")
+
+        hdr_zip, hdr_ptype, hdr_btn = st.columns([1.1, 1.2, 0.7], vertical_alignment="bottom")
+        with hdr_zip:
+            st.markdown("**Postal Code**")
+        with hdr_ptype:
+            st.markdown("**Property type**")
+        with hdr_btn:
+            st.markdown("")  # align with label row above Run button
+
+        row_zip, row_ptype, row_btn = st.columns([1.1, 1.2, 0.7], vertical_alignment="center")
+        with row_zip:
+            mi_postal = st.text_input(
+                "postal_code_mi",
+                value="",
+                placeholder="Enter Here",
+                label_visibility="collapsed",
+            )
+        with row_ptype:
+            mi_ptype = st.selectbox(
+                "property_type_mi",
+                ["Multi Family", "Industrial", "Office", "Hospitality"],
+                index=0,
+                label_visibility="collapsed",
+            )
+        with row_btn:
+            mi_run = st.button("Run", use_container_width=True)
+
+        if mi_run and mi_postal.strip():
+            st.markdown("---")
+            st.markdown("#### Market & Submarket Trends")
+            st.markdown(
+                f"""
+**Location**: {mi_postal.strip()}  ·  **Property type**: {mi_ptype}
+
+- **Current market conditions**: Leasing velocity is healthy with stable to modestly rising asking rents, while capital remains selective and focused on well-sponsored transactions. Lender underwriting is emphasizing in-place cash flow, rollover timing, and business-plan execution risk.
+- **Submarket dynamics**: Nearby assets are competing primarily on amenity quality and tenant improvement packages, with new supply clustered around the most transit- and amenity-rich nodes. Occupancy at institutional assets is trending slightly above the broader market, but backfill risk exists for older, less renovated product.
+- **Forward-looking view (12–24 months)**: Base case assumes muted but positive rent growth, modest cap-rate expansion, and continued bifurcation between prime locations and secondary corridors. Downside scenarios focus on tighter debt markets and slower lease-up; upside scenarios depend on faster-than-expected absorption and limited incremental supply.
+"""
+            )
+
+            st.markdown("#### Relevant Assets")
+            relevant_df = pd.DataFrame(
+                [
+                    {
+                        "Loan name": "Subject – Benchmark 1",
+                        "Balance": "$42,000,000",
+                        "Property type": mi_ptype,
+                        "LTV": "63%",
+                        "DSCR": "1.35x",
+                        "DY": "9.4%",
+                        "Subject Property Occupancy": "95%",
+                        "Market Occupancy": "93%",
+                        "FWD Yr rollover": "14%",
+                    },
+                    {
+                        "Loan name": "Subject – Benchmark 2",
+                        "Balance": "$35,500,000",
+                        "Property type": mi_ptype,
+                        "LTV": "59%",
+                        "DSCR": "1.42x",
+                        "DY": "8.9%",
+                        "Subject Property Occupancy": "92%",
+                        "Market Occupancy": "91%",
+                        "FWD Yr rollover": "11%",
+                    },
+                ]
+            )
+            st.dataframe(
+                relevant_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Loan name": st.column_config.TextColumn(width=280),
+                },
+            )
 elif page == "Developer Tools":
-    st.markdown("### 🔧 Developer Tools")
-    st.markdown("Configure API keys and admin behaviour for this demo.")
-    st.markdown("---")
+    if not st.session_state.get("access_granted"):
+        st.warning(INVITE_ONLY_MSG, icon="🔒")
+    else:
+        st.markdown("### 🔧 Developer Tools")
+        st.markdown(
+            "Optional overrides when **ANTHROPIC_API_KEY** / **PERPLEXITY_API_KEY** are not set in "
+            "Streamlit Secrets. In production, prefer Secrets only."
+        )
+        st.markdown("---")
 
-    anthropic_key = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        placeholder="sk-ant-...",
-        value=st.session_state.get("anthropic_key", ""),
-        help="Used for PDF extraction via Claude 3.5 Sonnet",
-    )
-    perplexity_key = st.text_input(
-        "Perplexity API Key",
-        type="password",
-        placeholder="pplx-...",
-        value=st.session_state.get("perplexity_key", ""),
-        help="Used for live market intelligence via Sonar",
-    )
-    st.session_state["anthropic_key"] = anthropic_key
-    st.session_state["perplexity_key"] = perplexity_key
+        anthropic_key = st.text_input(
+            "Anthropic API Key (override)",
+            type="password",
+            placeholder="sk-ant-...",
+            value=st.session_state.get("anthropic_key", ""),
+            help="Used only if ANTHROPIC_API_KEY is not set in Streamlit Secrets",
+        )
+        perplexity_key = st.text_input(
+            "Perplexity API Key (override)",
+            type="password",
+            placeholder="pplx-...",
+            value=st.session_state.get("perplexity_key", ""),
+            help="Used only if PERPLEXITY_API_KEY is not set in Streamlit Secrets",
+        )
+        st.session_state["anthropic_key"] = anthropic_key
+        st.session_state["perplexity_key"] = perplexity_key
 
-    st.markdown("---")
-    st.markdown(
-        "<div style='font-size:12px;color:#556b7d;line-height:1.6'>"
-        "Use the <b>Client ID</b> field in the sidebar to impersonate a client."
-        "</div>",
-        unsafe_allow_html=True,
-    )
+        st.markdown("---")
+        st.markdown(
+            "<div style='font-size:12px;color:#556b7d;line-height:1.6'>"
+            "Invite codes and API keys for production should live in <b>Streamlit Secrets</b>."
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESULTS
 # ─────────────────────────────────────────────────────────────────────────────
-if page == "Underwriting" and st.session_state["extracted"]:
+if page == "Underwriting" and st.session_state.get("access_granted") and st.session_state["extracted"]:
     extracted = st.session_state["extracted"]
     market    = st.session_state["market"]
 

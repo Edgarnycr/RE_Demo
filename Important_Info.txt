@@ -1,0 +1,5 @@
+Deploy (Streamlit Cloud or local):
+1. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` (local) or set the same keys in Cloud → Secrets.
+2. Set ANTHROPIC_API_KEY (required for extraction). Set PERPLEXITY_API_KEY for live Sonar market data (optional; Claude fallback otherwise).
+3. Set APP_INVITE_CODES (list) and/or APP_INVITE_CODE (single string). Users must enter a valid value in "Client ID / Access Code" before any tab works.
+4. Optional: ADMIN_ACCESS_CODE — use this value as the access code to view every client's uploads/logs in File Log (defaults to EDGAR_ADMIN if not set).
